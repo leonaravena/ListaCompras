@@ -27,8 +27,8 @@ const handleAuthentication = async () => {
 
     try {
       if (isLogin) {
+        // Al iniciar sesión exitosamente, App.tsx nos moverá automáticamente
         await signInWithEmailAndPassword(auth, email, password);
-        navigation.replace('MyLists'); // En el próximo paso cambiaremos esto a 'MyLists'
       } else {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
@@ -42,14 +42,13 @@ const handleAuthentication = async () => {
           members: [user.uid]
         });
 
-        // CAMBIO CLAVE: Ahora guardamos 'listIds' como un arreglo
         await setDoc(doc(db, 'users', user.uid), {
           email: user.email,
           listIds: [newListRef.id] 
         });
 
         Alert.alert('¡Éxito!', 'Cuenta creada correctamente.');
-        navigation.replace('MyLists'); // En el próximo paso cambiaremos esto a 'MyLists'
+        // Al crear la cuenta exitosamente, App.tsx nos moverá automáticamente
       }
     } catch (error: any) {
       if (error.code === 'auth/email-already-in-use') {

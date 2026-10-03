@@ -1,9 +1,8 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
+// Importamos initializeAuth y la función de persistencia móvil
+import { getAuth, initializeAuth, getReactNativePersistence } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// @ts-ignore - Ignoramos el falso positivo de tipado en React Native
-import { initializeAuth, getReactNativePersistence, getAuth } from 'firebase/auth';
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -14,14 +13,21 @@ const firebaseConfig = {
   messagingSenderId: "871728736804",
   appId: "1:871728736804:web:a5f2e710fb7bacc78586b1"
 };
-// 1. Inicializamos la app de forma segura sin usar 'let'
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+let app;
+let auth: any;
 
-// 2. Inicializamos la autenticación directamente en una constante
-const auth = getApps().length === 0 
-  ? initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) })
-  : getAuth(app);
+// Inicialización segura para el Fast Refresh de React Native
+if (getApps().length === 0) {
+  app = initializeApp(firebaseConfig);
+  // CAMBIO CLAVE: Inicializamos Auth indicándole que use AsyncStorage como memoria
+  auth = initializeAuth(app, {
+    persistence: getReactNativePersistence(AsyncStorage),
+  });
+} else {
+  app = getApp();
+  auth = getAuth(app);
+}
 
-// 3. Exportamos todo
-export const db = getFirestore(app);
-export { auth };
+const db = getFirestore(app);
+
+export { auth, db };

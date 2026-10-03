@@ -7,13 +7,12 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
-  ScrollView
+  ScrollView,
+  TextInput
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { auth, db } from '../config/firebase';
 import { doc, getDoc, collection, addDoc, updateDoc, arrayUnion, arrayRemove, deleteDoc } from 'firebase/firestore';
-
-// Nuevas importaciones para el Drag & Drop
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 
@@ -25,9 +24,13 @@ export default function MyListsScreen({ navigation }: any) {
   const [loading, setLoading] = useState(true);
   
   const [isEditing, setIsEditing] = useState(false);
-  const [customizingList, setCustomizingList] = useState<any>(null);
-  const [tempColor, setTempColor] = useState('');
-  const [tempIcon, setTempIcon] = useState('');
+  
+  // Estados unificados para el Modal (Crear o Editar)
+  const [isModalVisible, setIsModalVisible] = useState(false);
+  const [editingListId, setEditingListId] = useState<string | null>(null);
+  const [tempListName, setTempListName] = useState('');
+  const [tempColor, setTempColor] = useState(AVAILABLE_COLORS[0]);
+  const [tempIcon, setTempIcon] = useState(AVAILABLE_ICONS[0]);
 
   const fetchMyLists = async () => {
     const user = auth.currentUser;
@@ -63,31 +66,71 @@ export default function MyListsScreen({ navigation }: any) {
     return unsubscribe;
   }, [navigation]);
 
-  const handleCreateList = async () => {
+  // Abre el modal en modo "CREAR"
+  const openCreateModal = () => {
+    setEditingListId(null);
+    setTempListName('');
+    setTempColor(AVAILABLE_COLORS[0]);
+    setTempIcon(AVAILABLE_ICONS[0]);
+    setIsModalVisible(true);
+  };
+
+  // Abre el modal en modo "EDITAR"
+  const openEditModal = (list: any) => {
+    setEditingListId(list.id);
+    setTempListName(list.name || '');
+    setTempColor(list.color || AVAILABLE_COLORS[0]);
+    setTempIcon(list.icon || AVAILABLE_ICONS[0]);
+    setIsModalVisible(true);
+  };
+
+  // Función inteligente que decide si crea o actualiza en Firebase
+// Función inteligente que decide si crea o actualiza en Firebase
+  const saveList = async () => {
+    if (tempListName.trim() === '') {
+      Alert.alert('Error', 'Debes darle un nombre a la lista.');
+      return;
+    }
+
     const user = auth.currentUser;
     if (!user) return;
 
     setLoading(true);
     try {
-      const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase() + 
-                         '-' + Math.floor(1000 + Math.random() * 9000);
+      if (editingListId) {
+        // MODO ACTUALIZAR
+        await updateDoc(doc(db, 'shopping_lists', editingListId), {
+          name: tempListName.trim(),
+          color: tempColor,
+          icon: tempIcon
+        });
+        
+        // CAMBIO CLAVE: Apagamos el modo edición automáticamente al guardar
+        setIsEditing(false);
+        
+      } else {
+        // MODO CREAR
+        const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase() + 
+                           '-' + Math.floor(1000 + Math.random() * 9000);
 
-      const newListRef = await addDoc(collection(db, 'shopping_lists'), {
-        name: 'Nueva Lista',
-        joinCode: randomCode,
-        createdAt: new Date(),
-        members: [user.uid],
-        icon: 'cart-outline',
-        color: '#007AFF'
-      });
+        const newListRef = await addDoc(collection(db, 'shopping_lists'), {
+          name: tempListName.trim(),
+          joinCode: randomCode,
+          createdAt: new Date(),
+          members: [user.uid],
+          icon: tempIcon,
+          color: tempColor
+        });
 
-      await updateDoc(doc(db, 'users', user.uid), {
-        listIds: arrayUnion(newListRef.id)
-      });
+        await updateDoc(doc(db, 'users', user.uid), {
+          listIds: arrayUnion(newListRef.id)
+        });
+      }
 
+      setIsModalVisible(false);
       await fetchMyLists();
     } catch (error) {
-      Alert.alert('Error', 'No se pudo crear la lista');
+      Alert.alert('Error', editingListId ? 'No se pudo actualizar' : 'No se pudo crear la lista');
       setLoading(false);
     }
   };
@@ -95,7 +138,7 @@ export default function MyListsScreen({ navigation }: any) {
   const confirmDeleteList = (listId: string, listName: string) => {
     Alert.alert(
       'Eliminar Lista',
-      `¿Estás seguro de que quieres eliminar "${listName || 'Nuestra Lista'}" de tu cuenta?`,
+      `¿Estás seguro de que quieres salir de "${listName || 'Nuestra Lista'}"?`,
       [
         { text: 'Cancelar', style: 'cancel' },
         { text: 'Eliminar', style: 'destructive', onPress: () => removeListFromUser(listId) }
@@ -129,40 +172,13 @@ export default function MyListsScreen({ navigation }: any) {
     }
   };
 
-  const openCustomization = (list: any) => {
-    setTempColor(list.color || '#007AFF');
-    setTempIcon(list.icon || 'cart-outline');
-    setCustomizingList(list);
-  };
-
-  const saveCustomization = async () => {
-    if (!customizingList) return;
-    try {
-      await updateDoc(doc(db, 'shopping_lists', customizingList.id), {
-        color: tempColor,
-        icon: tempIcon
-      });
-      setCustomizingList(null);
-      fetchMyLists(); 
-    } catch (error) {
-      Alert.alert('Error', 'No se pudo guardar la personalización');
-    }
-  };
-
-  // NUEVA FUNCIÓN: Guarda el nuevo orden en Firebase al soltar la tarjeta
   const handleDragEnd = async (newData: any[]) => {
-    setLists(newData); // Actualiza la UI instantáneamente
-    
+    setLists(newData); 
     const user = auth.currentUser;
     if (!user) return;
-    
-    // Extraemos solo los IDs en el nuevo orden
     const newListIds = newData.map(list => list.id);
-    
     try {
-      await updateDoc(doc(db, 'users', user.uid), {
-        listIds: newListIds
-      });
+      await updateDoc(doc(db, 'users', user.uid), { listIds: newListIds });
     } catch (error) {
       console.log("Error guardando el nuevo orden:", error);
     }
@@ -177,7 +193,6 @@ export default function MyListsScreen({ navigation }: any) {
   }
 
   return (
-    // Envolvemos toda la pantalla en el controlador de gestos
     <GestureHandlerRootView style={{ flex: 1 }}>
       <View style={styles.container}>
         <View style={styles.header}>
@@ -186,7 +201,6 @@ export default function MyListsScreen({ navigation }: any) {
             <TouchableOpacity onPress={() => setIsEditing(!isEditing)} style={styles.editButton}>
               <Text style={styles.editButtonText}>{isEditing ? 'Listo' : 'Editar'}</Text>
             </TouchableOpacity>
-            
             {!isEditing && (
               <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={{ marginLeft: 16 }}>
                 <Ionicons name="settings-outline" size={24} color="#333" />
@@ -195,48 +209,33 @@ export default function MyListsScreen({ navigation }: any) {
           </View>
         </View>
 
-        {/* Reemplazamos FlatList por DraggableFlatList */}
         <DraggableFlatList
           data={lists}
           onDragEnd={({ data }) => handleDragEnd(data)}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContainer}
-          // El renderItem ahora recibe 'drag' (la función que inicia el arrastre) e 'isActive'
           renderItem={({ item, drag, isActive }) => {
             const listColor = item.color || '#007AFF';
             const listIcon = item.icon || 'cart-outline';
 
             return (
-              // ScaleDecorator hace que la tarjeta "salte" sutilmente al levantarla
               <ScaleDecorator>
                 <TouchableOpacity 
-                  style={[
-                    styles.listCard, 
-                    { 
-                      borderColor: isEditing ? listColor : '#eee',
-                      backgroundColor: isActive ? '#f8f9fa' : '#fff', // Se oscurece un poco al arrastrar
-                      elevation: isActive ? 8 : 0 // Sombra nativa en Android
-                    }
-                  ]}
+                  style={[styles.listCard, { borderColor: isEditing ? listColor : '#eee', backgroundColor: isActive ? '#f8f9fa' : '#fff', elevation: isActive ? 8 : 0 }]}
                   onPress={() => !isEditing && navigation.navigate('Home', { listId: item.id })}
                   activeOpacity={isEditing ? 1 : 0.7}
                   disabled={isActive}
                 >
                   <View style={styles.cardHeader}>
                     {isEditing && (
-                      // Enlazamos la función 'drag' a un longPress en el ícono de hamburguesa
-                      <TouchableOpacity 
-                        onLongPress={drag} 
-                        delayLongPress={150} 
-                        style={{ padding: 8, marginLeft: -8, marginRight: 4 }}
-                      >
+                      <TouchableOpacity onLongPress={drag} delayLongPress={150} style={{ padding: 8, marginLeft: -8, marginRight: 4 }}>
                         <Ionicons name="menu" size={24} color="#ccc" />
                       </TouchableOpacity>
                     )}
 
                     <TouchableOpacity 
                       disabled={!isEditing} 
-                      onPress={() => openCustomization(item)}
+                      onPress={() => openEditModal(item)}
                       style={[styles.iconContainer, { backgroundColor: isEditing ? `${listColor}15` : 'transparent' }]}
                     >
                       <Ionicons name={listIcon as any} size={40} color={listColor} />
@@ -248,7 +247,7 @@ export default function MyListsScreen({ navigation }: any) {
                     </TouchableOpacity>
                     
                     <View style={{ marginLeft: 12 }}>
-                      <Text style={styles.cardTitle}>{item.name || 'Nuestra Lista'}</Text>
+                      <Text style={styles.cardTitle}>{item.name}</Text>
                       <Text style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
                         Código: {item.joinCode}
                       </Text>
@@ -266,53 +265,54 @@ export default function MyListsScreen({ navigation }: any) {
               </ScaleDecorator>
             );
           }}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>No tienes listas. Presiona el botón inferior para crear una o ve a configuración para unirte a una.</Text>
-          }
+          ListEmptyComponent={<Text style={styles.emptyText}>No tienes listas. Presiona el botón inferior para crear una o ve a configuración para unirte a una.</Text>}
         />
 
+        {/* Solo mostramos el FAB si NO estamos en modo edición */}
         {!isEditing && (
-          <TouchableOpacity style={styles.fab} onPress={handleCreateList}>
+          <TouchableOpacity style={styles.fab} onPress={openCreateModal}>
             <Ionicons name="add" size={32} color="#fff" />
           </TouchableOpacity>
         )}
 
-        <Modal visible={!!customizingList} animationType="slide" transparent={true}>
+        {/* MODAL INTELIGENTE (CREAR / EDITAR) */}
+        <Modal visible={isModalVisible} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Personalizar Lista</Text>
-                <TouchableOpacity onPress={() => setCustomizingList(null)}>
+                <Text style={styles.modalTitle}>{editingListId ? 'Editar Lista' : 'Nueva Lista'}</Text>
+                <TouchableOpacity onPress={() => setIsModalVisible(false)}>
                   <Ionicons name="close" size={24} color="#333" />
                 </TouchableOpacity>
               </View>
 
+              <Text style={styles.modalSubtitle}>Nombre de la Lista</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={tempListName}
+                onChangeText={setTempListName}
+                placeholder="Ej: Ferretería"
+                autoFocus={!editingListId} // Auto-focus solo al crear
+              />
+
               <Text style={styles.modalSubtitle}>Color</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pickerRow}>
                 {AVAILABLE_COLORS.map((color) => (
-                  <TouchableOpacity 
-                    key={color} 
-                    style={[styles.colorCircle, { backgroundColor: color, borderWidth: tempColor === color ? 3 : 0 }]} 
-                    onPress={() => setTempColor(color)} 
-                  />
+                  <TouchableOpacity key={color} style={[styles.colorCircle, { backgroundColor: color, borderWidth: tempColor === color ? 3 : 0 }]} onPress={() => setTempColor(color)} />
                 ))}
               </ScrollView>
 
               <Text style={styles.modalSubtitle}>Ícono</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pickerRow}>
                 {AVAILABLE_ICONS.map((icon) => (
-                  <TouchableOpacity 
-                    key={icon} 
-                    style={[styles.iconBox, { borderColor: tempIcon === icon ? tempColor : '#eee' }]} 
-                    onPress={() => setTempIcon(icon)}
-                  >
+                  <TouchableOpacity key={icon} style={[styles.iconBox, { borderColor: tempIcon === icon ? tempColor : '#eee' }]} onPress={() => setTempIcon(icon)}>
                     <Ionicons name={icon as any} size={28} color={tempIcon === icon ? tempColor : '#888'} />
                   </TouchableOpacity>
                 ))}
               </ScrollView>
 
-              <TouchableOpacity style={[styles.saveButton, { backgroundColor: tempColor }]} onPress={saveCustomization}>
-                <Text style={styles.saveButtonText}>Guardar Cambios</Text>
+              <TouchableOpacity style={[styles.saveButton, { backgroundColor: tempColor }]} onPress={saveList}>
+                <Text style={styles.saveButtonText}>{editingListId ? 'Guardar Cambios' : 'Crear Lista'}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -330,24 +330,21 @@ const styles = StyleSheet.create({
   headerRight: { flexDirection: 'row', alignItems: 'center' },
   editButton: { backgroundColor: '#e5e5ea', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 16 },
   editButtonText: { color: '#007AFF', fontWeight: 'bold', fontSize: 16 },
-  
   listContainer: { paddingHorizontal: 16, paddingBottom: 100 }, 
   listCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, marginBottom: 16, borderRadius: 12, borderWidth: 2 },
   cardHeader: { flexDirection: 'row', alignItems: 'center' },
   cardTitle: { fontSize: 18, fontWeight: 'bold', color: '#333' },
-  
   iconContainer: { padding: 8, borderRadius: 8, position: 'relative' },
   editBadge: { position: 'absolute', top: -4, right: -4, backgroundColor: '#007AFF', width: 20, height: 20, borderRadius: 10, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#fff' },
   deleteButton: { padding: 8, marginRight: -8 },
-  
   emptyText: { textAlign: 'center', color: '#888', marginTop: 32, fontSize: 16, paddingHorizontal: 24 },
   fab: { position: 'absolute', bottom: 32, right: 24, backgroundColor: '#007AFF', width: 64, height: 64, borderRadius: 32, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 5 },
-
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 48 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
   modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#333' },
   modalSubtitle: { fontSize: 16, fontWeight: 'bold', color: '#666', marginBottom: 12 },
+  modalInput: { backgroundColor: '#f8f9fa', borderWidth: 1, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 12, fontSize: 16, marginBottom: 24 },
   pickerRow: { flexDirection: 'row', marginBottom: 24 },
   colorCircle: { width: 48, height: 48, borderRadius: 24, marginRight: 16, borderColor: '#333' },
   iconBox: { width: 56, height: 56, borderRadius: 12, borderWidth: 2, justifyContent: 'center', alignItems: 'center', marginRight: 16 },
