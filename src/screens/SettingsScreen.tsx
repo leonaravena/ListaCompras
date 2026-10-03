@@ -13,37 +13,23 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { auth, db } from '../config/firebase';
-import { doc, getDoc, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
+// 1. Agregamos arrayUnion a la importación
+import { doc, getDoc, updateDoc, collection, query, where, getDocs, arrayUnion } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
 
 export default function SettingsScreen({ navigation }: any) {
   const [partnerCode, setPartnerCode] = useState('');
   const [myEmail, setMyEmail] = useState('');
-  const [myCode, setMyCode] = useState('');
+  // Dejamos el código temporalmente en blanco ya que ahora cada lista tendrá el suyo
+  const [myCode, setMyCode] = useState('Visible en cada lista'); 
   const [loading, setLoading] = useState(true);
 
-  // 1. Cargar los datos del usuario actual al abrir la pantalla
+  // 2. Limpiamos el useEffect para que no colapse al no encontrar el listId antiguo
   useEffect(() => {
     const fetchUserData = async () => {
       const user = auth.currentUser;
       if (user) {
         setMyEmail(user.email || '');
-        
-        // Buscamos a qué lista pertenece este usuario
-        const userDocRef = doc(db, 'users', user.uid);
-        const userDoc = await getDoc(userDocRef);
-        
-        if (userDoc.exists()) {
-          const listId = userDoc.data().listId;
-          
-          // Buscamos el código de esa lista
-          const listDocRef = doc(db, 'shopping_lists', listId);
-          const listDoc = await getDoc(listDocRef);
-          
-          if (listDoc.exists()) {
-            setMyCode(listDoc.data().joinCode);
-          }
-        }
       }
       setLoading(false);
     };
@@ -52,18 +38,18 @@ export default function SettingsScreen({ navigation }: any) {
   }, []);
 
   const handleCopyCode = async () => {
+    if (myCode === 'Visible en cada lista') return;
     await Clipboard.setStringAsync(myCode);
     Alert.alert('Copiado', 'El código ha sido copiado al portapapeles.');
   };
 
-  // 2. Lógica para buscar el código y cambiar de lista
+  // 3. Actualizamos handleJoin con arrayUnion y navegación a MyLists
   const handleJoin = async () => {
     if (partnerCode.trim() === '') return;
     
     try {
       const formattedCode = partnerCode.trim().toUpperCase();
       
-      // Hacemos una consulta a Firestore buscando una lista que tenga este código exacto
       const q = query(collection(db, 'shopping_lists'), where('joinCode', '==', formattedCode));
       const querySnapshot = await getDocs(q);
       
@@ -72,27 +58,30 @@ export default function SettingsScreen({ navigation }: any) {
         return;
       }
       
-      // Si la encontramos, sacamos su ID interno de Firebase
       const listDoc = querySnapshot.docs[0];
       const newListId = listDoc.id;
       
-      // Actualizamos el perfil de nuestro usuario para que ahora apunte a esta nueva lista
-      const user = auth.currentUser;
+     const user = auth.currentUser;
       if (user) {
-        await updateDoc(doc(db, 'users', user.uid), {
-          listId: newListId
+        // 1. Inyectamos tu usuario en el documento de la lista compartida
+        await updateDoc(doc(db, 'shopping_lists', newListId), {
+          members: arrayUnion(user.uid)
         });
         
-        Alert.alert('¡Éxito!', 'Te has unido a la lista de tu pareja.');
+        // 2. Agregamos la lista a tu historial de usuario
+        await updateDoc(doc(db, 'users', user.uid), {
+          listIds: arrayUnion(newListId)
+        });
+        
+        Alert.alert('¡Éxito!', 'Te has unido a una nueva lista.');
         setPartnerCode('');
-        navigation.goBack(); // Volvemos a la pantalla principal para ver los nuevos productos
+        navigation.navigate('MyLists');
       }
     } catch (error: any) {
       Alert.alert('Error', 'Ocurrió un problema al intentar vincular la cuenta.');
     }
   };
 
-  // 3. Cerrar sesión borrando los datos del celular
   const handleLogout = async () => {
     try {
       await signOut(auth);
@@ -132,7 +121,7 @@ export default function SettingsScreen({ navigation }: any) {
           <View style={styles.codeContainer}>
             <View>
               <Text style={styles.label}>Tu código de grupo:</Text>
-              <Text style={styles.myCode}>{myCode}</Text>
+              <Text style={[styles.myCode, {fontSize: 16, color: '#888', letterSpacing: 0}]}>{myCode}</Text>
             </View>
             <TouchableOpacity style={styles.copyButton} onPress={handleCopyCode}>
               <Ionicons name="copy-outline" size={20} color="#fff" />

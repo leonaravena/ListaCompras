@@ -19,8 +19,7 @@ export default function LoginScreen({ navigation }: any) {
   const [password, setPassword] = useState('');
   const [isLogin, setIsLogin] = useState(true);
 
-  const handleAuthentication = async () => {
-    // Validación básica para evitar enviar datos vacíos a Firebase
+const handleAuthentication = async () => {
     if (email.trim() === '' || password.trim() === '') {
       Alert.alert('Error', 'Por favor, completa todos los campos.');
       return;
@@ -28,37 +27,31 @@ export default function LoginScreen({ navigation }: any) {
 
     try {
       if (isLogin) {
-        // FLUJO 1: INICIAR SESIÓN
         await signInWithEmailAndPassword(auth, email, password);
-        navigation.replace('Home');
+        navigation.replace('MyLists'); // En el próximo paso cambiaremos esto a 'MyLists'
       } else {
-        // FLUJO 2: REGISTRARSE
-        // a) Crear el usuario en Firebase Auth
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
 
-        // b) Generar un código de grupo aleatorio (Ej: ABCD-1234)
         const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase() + 
                            '-' + Math.floor(1000 + Math.random() * 9000);
 
-        // c) Crear la lista compartida en la colección 'shopping_lists'
         const newListRef = await addDoc(collection(db, 'shopping_lists'), {
           joinCode: randomCode,
           createdAt: new Date(),
           members: [user.uid]
         });
 
-        // d) Guardar el perfil del usuario en la colección 'users' vinculando su nueva lista
+        // CAMBIO CLAVE: Ahora guardamos 'listIds' como un arreglo
         await setDoc(doc(db, 'users', user.uid), {
           email: user.email,
-          listId: newListRef.id
+          listIds: [newListRef.id] 
         });
 
         Alert.alert('¡Éxito!', 'Cuenta creada correctamente.');
-        navigation.replace('Home');
+        navigation.replace('MyLists'); // En el próximo paso cambiaremos esto a 'MyLists'
       }
     } catch (error: any) {
-      // Firebase devuelve errores en inglés, aquí atrapamos los más comunes para el usuario
       if (error.code === 'auth/email-already-in-use') {
         Alert.alert('Error', 'Este correo ya está registrado.');
       } else if (error.code === 'auth/weak-password') {
