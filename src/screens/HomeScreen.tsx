@@ -16,6 +16,7 @@ import { auth, db } from '../config/firebase';
 import { collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 LogBox.ignoreLogs(['InteractionManager has been deprecated']);
 
@@ -103,9 +104,24 @@ export default function HomeScreen({ route, navigation }: any) {
     return () => unsubscribeList();
   }, [listId]);
 
-  // 3. Escuchar los productos
+// 3. Escuchar los productos (Con Soporte Offline / Cache-First)
   useEffect(() => {
     if (!listId) return;
+
+    // A. CARGA ULTRARRÁPIDA: Leemos el disco duro antes de consultar a internet
+    const loadCache = async () => {
+      try {
+        const cachedItems = await AsyncStorage.getItem(`@items_cache_${listId}`);
+        if (cachedItems) {
+          setItems(JSON.parse(cachedItems)); // Dibujamos la pantalla al instante
+        }
+      } catch (error) {
+        console.log("Error leyendo caché", error);
+      }
+    };
+    loadCache();
+
+    // B. CONEXIÓN EN SEGUNDO PLANO: Escuchamos Firebase en tiempo real
     const itemsRef = collection(db, 'shopping_lists', listId, 'items');
     const q = query(itemsRef, orderBy('order', 'asc'));
 
@@ -129,8 +145,13 @@ export default function HomeScreen({ route, navigation }: any) {
           order: data.order || 0
         });
       });
-      setItems(fetchedItems);
+      
+      setItems(fetchedItems); // Actualizamos la pantalla si hay cambios
+      
+      // C. GUARDAMOS LA COPIA: Actualizamos el disco duro para la próxima vez
+      AsyncStorage.setItem(`@items_cache_${listId}`, JSON.stringify(fetchedItems));
     });
+    
     return () => unsubscribeItems();
   }, [listId]);
 

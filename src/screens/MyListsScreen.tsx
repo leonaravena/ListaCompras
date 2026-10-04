@@ -11,6 +11,7 @@ import {
   TextInput
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '../config/firebase';
 import { doc, getDoc, collection, addDoc, updateDoc, arrayUnion, arrayRemove, deleteDoc } from 'firebase/firestore';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -33,10 +34,18 @@ export default function MyListsScreen({ navigation }: any) {
   const [tempIcon, setTempIcon] = useState(AVAILABLE_ICONS[0]);
 
   const fetchMyLists = async () => {
-    const user = auth.currentUser;
-    if (!user) return;
-
     try {
+      // 1. CARGA RÁPIDA DESDE CACHÉ (Soporte Offline)
+      const cachedLists = await AsyncStorage.getItem('@my_lists_cache');
+      if (cachedLists) {
+        setLists(JSON.parse(cachedLists));
+        setLoading(false); 
+      }
+
+      // 2. BÚSQUEDA REAL EN FIREBASE
+      const user = auth.currentUser;
+      if (!user) return;
+
       const userDoc = await getDoc(doc(db, 'users', user.uid));
       if (userDoc.exists()) {
         const userListIds = userDoc.data().listIds || [];
@@ -48,18 +57,21 @@ export default function MyListsScreen({ navigation }: any) {
             loadedLists.push({ id, ...listDoc.data() });
           }
         }
+        
         setLists(loadedLists);
+        setLoading(false);
+        
+        // 3. GUARDAMOS EL NUEVO CACHÉ
+        await AsyncStorage.setItem('@my_lists_cache', JSON.stringify(loadedLists));
       }
     } catch (error) {
       console.log("Error cargando listas:", error);
-    } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
-      setLoading(true);
       fetchMyLists();
       setIsEditing(false);
     });
@@ -85,7 +97,6 @@ export default function MyListsScreen({ navigation }: any) {
   };
 
   // Función inteligente que decide si crea o actualiza en Firebase
-// Función inteligente que decide si crea o actualiza en Firebase
   const saveList = async () => {
     if (tempListName.trim() === '') {
       Alert.alert('Error', 'Debes darle un nombre a la lista.');
@@ -104,10 +115,8 @@ export default function MyListsScreen({ navigation }: any) {
           color: tempColor,
           icon: tempIcon
         });
-        
-        // CAMBIO CLAVE: Apagamos el modo edición automáticamente al guardar
+        // Apagamos el modo edición automáticamente al guardar
         setIsEditing(false);
-        
       } else {
         // MODO CREAR
         const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase() + 
@@ -179,6 +188,8 @@ export default function MyListsScreen({ navigation }: any) {
     const newListIds = newData.map(list => list.id);
     try {
       await updateDoc(doc(db, 'users', user.uid), { listIds: newListIds });
+      // Guardamos el nuevo orden en caché inmediatamente para evitar saltos al recargar
+      await AsyncStorage.setItem('@my_lists_cache', JSON.stringify(newData));
     } catch (error) {
       console.log("Error guardando el nuevo orden:", error);
     }
