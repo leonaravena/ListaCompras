@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,14 +11,88 @@ import {
   TextInput
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '../config/firebase';
 import { doc, getDoc, collection, addDoc, updateDoc, arrayUnion, arrayRemove, deleteDoc } from 'firebase/firestore';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
+
+// IMPORTACIONES CORREGIDAS
+// IMPORTACIÓN CORREGIDA (Sin la palabra inventada "reorderable")
+import ReorderableList, { useReorderableDrag } from 'react-native-reorderable-list';
+import { runOnJS } from 'react-native-reanimated';
 
 const AVAILABLE_COLORS = ['#007AFF', '#34C759', '#FF9500', '#FF3B30', '#AF52DE', '#5856D6'];
 const AVAILABLE_ICONS = ['cart-outline', 'home-outline', 'airplane-outline', 'barbell-outline', 'hammer-outline', 'fast-food-outline', 'gift-outline', 'paw-outline'];
+
+// 1. EL CASCARÓN VISUAL (React.memo para rendimiento)
+const ListCardContent = React.memo(({ item, isEditing, drag, onNavigate, onEdit, onDelete }: any) => {
+  const listColor = item.color || '#007AFF';
+  const listIcon = item.icon || 'cart-outline';
+
+  return (
+    <TouchableOpacity 
+      style={[styles.listCard, { borderColor: isEditing ? listColor : '#eee', backgroundColor: '#fff' }]}
+      onPress={() => !isEditing && onNavigate(item.id)}
+      activeOpacity={isEditing ? 1 : 0.7}
+    >
+      <View style={styles.cardHeader}>
+        {isEditing && (
+          <TouchableOpacity 
+            onLongPress={drag} 
+            delayLongPress={150} 
+            style={{ padding: 8, marginLeft: -8, marginRight: 4 }}
+          >
+            <Ionicons name="menu" size={24} color="#ccc" />
+          </TouchableOpacity>
+        )}
+
+        <TouchableOpacity 
+          disabled={!isEditing} 
+          onPress={() => onEdit(item)}
+          style={[styles.iconContainer, { backgroundColor: isEditing ? `${listColor}15` : 'transparent' }]}
+        >
+          <Ionicons name={listIcon as any} size={40} color={listColor} />
+          {isEditing && (
+            <View style={styles.editBadge}>
+              <Ionicons name="pencil" size={12} color="#fff" />
+            </View>
+          )}
+        </TouchableOpacity>
+        
+        <View style={{ marginLeft: 12 }}>
+          <Text style={styles.cardTitle}>{item.name}</Text>
+          <Text style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+            Código: {item.joinCode}
+          </Text>
+        </View>
+      </View>
+      
+      {isEditing ? (
+        <TouchableOpacity style={styles.deleteButton} onPress={() => onDelete(item.id, item.name)}>
+          <Ionicons name="trash-outline" size={24} color="#FF3B30" />
+        </TouchableOpacity>
+      ) : (
+        <Ionicons name="chevron-forward" size={24} color="#ccc" />
+      )}
+    </TouchableOpacity>
+  );
+}, (prev, next) => {
+  return (
+    prev.item.id === next.item.id &&
+    prev.item.name === next.item.name &&
+    prev.item.color === next.item.color &&
+    prev.item.icon === next.item.icon &&
+    prev.isEditing === next.isEditing
+  );
+});
+
+// 2. EL ENVOLTORIO DE ARRASTRE (Usando React.memo normal)
+const DraggableListCard = React.memo((props: any) => {
+  const drag = useReorderableDrag();
+  return <ListCardContent {...props} drag={drag} />;
+});
+
 
 export default function MyListsScreen({ navigation }: any) {
   const [lists, setLists] = useState<any[]>([]);
@@ -26,7 +100,6 @@ export default function MyListsScreen({ navigation }: any) {
   
   const [isEditing, setIsEditing] = useState(false);
   
-  // Estados unificados para el Modal (Crear o Editar)
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [editingListId, setEditingListId] = useState<string | null>(null);
   const [tempListName, setTempListName] = useState('');
@@ -34,22 +107,19 @@ export default function MyListsScreen({ navigation }: any) {
   const [tempIcon, setTempIcon] = useState(AVAILABLE_ICONS[0]);
 
   const fetchMyLists = async () => {
+    const user = auth.currentUser;
+    if (!user) return;
+
     try {
-      // 1. CARGA RÁPIDA DESDE CACHÉ (Soporte Offline)
       const cachedLists = await AsyncStorage.getItem('@my_lists_cache');
       if (cachedLists) {
         setLists(JSON.parse(cachedLists));
-        setLoading(false); 
+        setLoading(false);
       }
-
-      // 2. BÚSQUEDA REAL EN FIREBASE
-      const user = auth.currentUser;
-      if (!user) return;
 
       const userDoc = await getDoc(doc(db, 'users', user.uid));
       if (userDoc.exists()) {
         const userListIds = userDoc.data().listIds || [];
-        
         const loadedLists = [];
         for (const id of userListIds) {
           const listDoc = await getDoc(doc(db, 'shopping_lists', id));
@@ -57,28 +127,25 @@ export default function MyListsScreen({ navigation }: any) {
             loadedLists.push({ id, ...listDoc.data() });
           }
         }
-        
         setLists(loadedLists);
-        setLoading(false);
-        
-        // 3. GUARDAMOS EL NUEVO CACHÉ
         await AsyncStorage.setItem('@my_lists_cache', JSON.stringify(loadedLists));
       }
     } catch (error) {
       console.log("Error cargando listas:", error);
+    } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
+      setLoading(true);
       fetchMyLists();
       setIsEditing(false);
     });
     return unsubscribe;
   }, [navigation]);
 
-  // Abre el modal en modo "CREAR"
   const openCreateModal = () => {
     setEditingListId(null);
     setTempListName('');
@@ -87,16 +154,14 @@ export default function MyListsScreen({ navigation }: any) {
     setIsModalVisible(true);
   };
 
-  // Abre el modal en modo "EDITAR"
-  const openEditModal = (list: any) => {
+  const openEditModal = useCallback((list: any) => {
     setEditingListId(list.id);
     setTempListName(list.name || '');
     setTempColor(list.color || AVAILABLE_COLORS[0]);
     setTempIcon(list.icon || AVAILABLE_ICONS[0]);
     setIsModalVisible(true);
-  };
+  }, []);
 
-  // Función inteligente que decide si crea o actualiza en Firebase
   const saveList = async () => {
     if (tempListName.trim() === '') {
       Alert.alert('Error', 'Debes darle un nombre a la lista.');
@@ -109,16 +174,12 @@ export default function MyListsScreen({ navigation }: any) {
     setLoading(true);
     try {
       if (editingListId) {
-        // MODO ACTUALIZAR
         await updateDoc(doc(db, 'shopping_lists', editingListId), {
           name: tempListName.trim(),
           color: tempColor,
           icon: tempIcon
         });
-        // Apagamos el modo edición automáticamente al guardar
-        setIsEditing(false);
       } else {
-        // MODO CREAR
         const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase() + 
                            '-' + Math.floor(1000 + Math.random() * 9000);
 
@@ -144,7 +205,7 @@ export default function MyListsScreen({ navigation }: any) {
     }
   };
 
-  const confirmDeleteList = (listId: string, listName: string) => {
+  const confirmDeleteList = useCallback((listId: string, listName: string) => {
     Alert.alert(
       'Eliminar Lista',
       `¿Estás seguro de que quieres salir de "${listName || 'Nuestra Lista'}"?`,
@@ -153,7 +214,7 @@ export default function MyListsScreen({ navigation }: any) {
         { text: 'Eliminar', style: 'destructive', onPress: () => removeListFromUser(listId) }
       ]
     );
-  };
+  }, []);
 
   const removeListFromUser = async (listId: string) => {
     const user = auth.currentUser;
@@ -181,15 +242,25 @@ export default function MyListsScreen({ navigation }: any) {
     }
   };
 
-  const handleDragEnd = async (newData: any[]) => {
+  const navigateToHome = useCallback((id: string) => {
+    navigation.navigate('Home', { listId: id });
+  }, [navigation]);
+
+  const handleReorder = async ({ from, to }: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const newData = [...lists];
+    const [movedItem] = newData.splice(from, 1);
+    newData.splice(to, 0, movedItem);
+    
     setLists(newData); 
+    AsyncStorage.setItem('@my_lists_cache', JSON.stringify(newData));
+
     const user = auth.currentUser;
     if (!user) return;
     const newListIds = newData.map(list => list.id);
+    
     try {
       await updateDoc(doc(db, 'users', user.uid), { listIds: newListIds });
-      // Guardamos el nuevo orden en caché inmediatamente para evitar saltos al recargar
-      await AsyncStorage.setItem('@my_lists_cache', JSON.stringify(newData));
     } catch (error) {
       console.log("Error guardando el nuevo orden:", error);
     }
@@ -220,73 +291,36 @@ export default function MyListsScreen({ navigation }: any) {
           </View>
         </View>
 
-        <DraggableFlatList
+        <ReorderableList
           data={lists}
-          onDragEnd={({ data }) => handleDragEnd(data)}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContainer}
-          renderItem={({ item, drag, isActive }) => {
-            const listColor = item.color || '#007AFF';
-            const listIcon = item.icon || 'cart-outline';
-
-            return (
-              <ScaleDecorator>
-                <TouchableOpacity 
-                  style={[styles.listCard, { borderColor: isEditing ? listColor : '#eee', backgroundColor: isActive ? '#f8f9fa' : '#fff', elevation: isActive ? 8 : 0 }]}
-                  onPress={() => !isEditing && navigation.navigate('Home', { listId: item.id })}
-                  activeOpacity={isEditing ? 1 : 0.7}
-                  disabled={isActive}
-                >
-                  <View style={styles.cardHeader}>
-                    {isEditing && (
-                      <TouchableOpacity onLongPress={drag} delayLongPress={150} style={{ padding: 8, marginLeft: -8, marginRight: 4 }}>
-                        <Ionicons name="menu" size={24} color="#ccc" />
-                      </TouchableOpacity>
-                    )}
-
-                    <TouchableOpacity 
-                      disabled={!isEditing} 
-                      onPress={() => openEditModal(item)}
-                      style={[styles.iconContainer, { backgroundColor: isEditing ? `${listColor}15` : 'transparent' }]}
-                    >
-                      <Ionicons name={listIcon as any} size={40} color={listColor} />
-                      {isEditing && (
-                        <View style={styles.editBadge}>
-                          <Ionicons name="pencil" size={12} color="#fff" />
-                        </View>
-                      )}
-                    </TouchableOpacity>
-                    
-                    <View style={{ marginLeft: 12 }}>
-                      <Text style={styles.cardTitle}>{item.name}</Text>
-                      <Text style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
-                        Código: {item.joinCode}
-                      </Text>
-                    </View>
-                  </View>
-                  
-                  {isEditing ? (
-                    <TouchableOpacity style={styles.deleteButton} onPress={() => confirmDeleteList(item.id, item.name)}>
-                      <Ionicons name="trash-outline" size={24} color="#FF3B30" />
-                    </TouchableOpacity>
-                  ) : (
-                    <Ionicons name="chevron-forward" size={24} color="#ccc" />
-                  )}
-                </TouchableOpacity>
-              </ScaleDecorator>
-            );
+          onDragStart={() => {
+            'worklet';
+            runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Heavy);
           }}
+          onReorder={({ from, to }) => {
+            'worklet';
+            runOnJS(handleReorder)({ from, to });
+          }}
+          keyExtractor={(item: any) => item.id}
+          contentContainerStyle={styles.listContainer}
+          renderItem={({ item }) => (
+            <DraggableListCard
+              item={item}
+              isEditing={isEditing}
+              onNavigate={navigateToHome}
+              onEdit={openEditModal}
+              onDelete={confirmDeleteList}
+            />
+          )}
           ListEmptyComponent={<Text style={styles.emptyText}>No tienes listas. Presiona el botón inferior para crear una o ve a configuración para unirte a una.</Text>}
         />
 
-        {/* Solo mostramos el FAB si NO estamos en modo edición */}
         {!isEditing && (
           <TouchableOpacity style={styles.fab} onPress={openCreateModal}>
             <Ionicons name="add" size={32} color="#fff" />
           </TouchableOpacity>
         )}
 
-        {/* MODAL INTELIGENTE (CREAR / EDITAR) */}
         <Modal visible={isModalVisible} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
@@ -303,7 +337,7 @@ export default function MyListsScreen({ navigation }: any) {
                 value={tempListName}
                 onChangeText={setTempListName}
                 placeholder="Ej: Ferretería"
-                autoFocus={!editingListId} // Auto-focus solo al crear
+                autoFocus={!editingListId}
               />
 
               <Text style={styles.modalSubtitle}>Color</Text>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,15 +8,20 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
-  LogBox
+  LogBox,
+  Animated
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import * as Haptics from 'expo-haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '../config/firebase';
 import { collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// LIBRERÍAS DE ANIMACIÓN MODERNAS Y EL PUENTE "runOnJS"
+import ReorderableList, { useReorderableDrag } from 'react-native-reorderable-list';
+import { runOnJS } from 'react-native-reanimated';
 
 LogBox.ignoreLogs(['InteractionManager has been deprecated']);
 
@@ -25,7 +30,7 @@ interface Pocket {
   name: string;
   icon: string;
   color: string;
-  ownerName?: string; // NUEVO: Para saber de quién es el bolsillo en el Footer
+  ownerName?: string; 
 }
 
 interface Product {
@@ -44,11 +49,179 @@ interface Product {
   order: number;
 }
 
+// 1. EL CASCARÓN VISUAL (React.memo)
+const ProductCardContent = React.memo(({
+  item, drag, isExpanded, isDropdownOpen, currentUserId, myPockets,
+  onToggle, onDelete, onUpdateField, onExpand, onDropdown
+}: any) => {
+
+  const displayName = item.addedByName || (item.addedByEmail ? item.addedByEmail.charAt(0).toUpperCase() : 'U');
+  const initial = displayName.charAt(0).toUpperCase();
+  const isMe = item.addedBy === currentUserId;
+  const identityColor = item.addedByColor || (isMe ? '#007AFF' : '#FF9500');
+  const uiColor = item.isChecked ? '#888' : identityColor;
+  
+  const defaultLegacyPocket: Pocket = { id: 'legacy', name: item.paymentMethod || 'Efectivo', icon: 'wallet-outline', color: '#888', ownerName: item.addedByName || 'Usuario' };
+  const itemPocket: Pocket = item.pocket || defaultLegacyPocket;
+
+  if (item.isSeparator) {
+    return (
+      <TouchableOpacity 
+        onLongPress={drag} 
+        delayLongPress={150}
+        activeOpacity={0.8}
+        style={styles.separatorCard}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Ionicons name="folder-open" size={24} color="#888" style={{ marginRight: 8 }} />
+          <Text style={styles.separatorText}>{item.name}</Text>
+        </View>
+        <TouchableOpacity onPress={() => onDelete(item.id)}>
+          <Ionicons name="close-circle" size={24} color="#888" />
+        </TouchableOpacity>
+      </TouchableOpacity>
+    );
+  }
+
+  return (
+    <View style={[styles.itemCard, item.isChecked && styles.itemCardChecked]}>
+      <TouchableOpacity 
+        style={styles.itemRowBase} 
+        activeOpacity={0.7}
+        onPress={() => {
+          onExpand(isExpanded ? null : item.id);
+          onDropdown(null); 
+        }}
+        onLongPress={!item.isChecked ? drag : undefined} 
+        delayLongPress={150}
+      >
+        <TouchableOpacity onPress={() => onToggle(item.id, item.isChecked)} style={styles.checkButton}>
+          <Ionicons name={item.isChecked ? "checkbox" : "square-outline"} size={28} color={uiColor} />
+        </TouchableOpacity>
+
+        <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
+          <Text style={[styles.itemText, item.isChecked && styles.itemTextChecked]}>
+            {item.name}
+          </Text>
+          {!isExpanded && (
+            <View style={[styles.avatar, { backgroundColor: item.isChecked ? '#ccc' : identityColor }]}>
+              <Text style={styles.avatarText}>{initial}</Text>
+            </View>
+          )}
+        </View>
+
+        {!isExpanded && (
+          <View style={{ alignItems: 'flex-end' }}>
+            <View style={[styles.paymentBadge, { borderColor: item.isChecked ? '#eee' : itemPocket.color + '40', backgroundColor: item.isChecked ? '#f5f5f5' : itemPocket.color + '10' }]}>
+              <Ionicons name={itemPocket.icon as any} size={12} color={item.isChecked ? '#888' : itemPocket.color} style={{ marginRight: 4 }} />
+              <Text style={[styles.paymentBadgeText, { color: item.isChecked ? '#888' : itemPocket.color }]}>
+                {itemPocket.name}
+              </Text>
+            </View>
+            {(item.quantity > 1 || item.price > 0) && (
+              <Text style={styles.itemSubtext}>
+                {item.quantity} un • $ {item.price.toLocaleString('es-CL')}
+              </Text>
+            )}
+          </View>
+        )}
+      </TouchableOpacity>
+
+      {isExpanded && (
+        <View style={styles.expandedContent}>
+          <View style={styles.editorRow}>
+            <View style={styles.quantityControls}>
+              <TouchableOpacity style={styles.qtyButton} onPress={() => onUpdateField(item.id, 'quantity', Math.max(1, item.quantity - 1))}>
+                <Ionicons name="remove" size={20} color="#333" />
+              </TouchableOpacity>
+              <Text style={styles.qtyText}>{item.quantity}</Text>
+              <TouchableOpacity style={styles.qtyButton} onPress={() => onUpdateField(item.id, 'quantity', item.quantity + 1)}>
+                <Ionicons name="add" size={20} color="#333" />
+              </TouchableOpacity>
+            </View>
+            <Text style={{ color: '#888', marginHorizontal: 8 }}>x</Text>
+            <View style={styles.priceContainer}>
+              <Text style={styles.currencySymbol}>$</Text>
+              <TextInput
+                style={styles.priceInput}
+                keyboardType="numeric"
+                placeholder="0"
+                defaultValue={item.price > 0 ? item.price.toString() : ''}
+                onEndEditing={(e) => {
+                  const num = parseInt(e.nativeEvent.text.replace(/[^0-9]/g, '')) || 0;
+                  onUpdateField(item.id, 'price', num);
+                }}
+              />
+            </View>
+          </View>
+
+          <View style={styles.pocketRow}>
+            <Text style={styles.pocketLabel}>Paga:</Text>
+            <View style={styles.dropdownContainer}>
+              <TouchableOpacity 
+                style={[styles.dropdownHeader, isDropdownOpen && styles.dropdownHeaderOpen]}
+                onPress={() => onDropdown(isDropdownOpen ? null : item.id)}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Ionicons name={itemPocket.icon as any} size={16} color={itemPocket.color} style={{ marginRight: 8 }} />
+                  <Text style={styles.dropdownHeaderText}>{itemPocket.name}</Text>
+                </View>
+                <Ionicons name={isDropdownOpen ? "chevron-up" : "chevron-down"} size={16} color="#888" />
+              </TouchableOpacity>
+
+              {isDropdownOpen && (
+                <View style={styles.dropdownList}>
+                  {myPockets.length === 0 && (
+                    <Text style={{ padding: 12, color: '#888', fontStyle: 'italic', fontSize: 12 }}>No configurado</Text>
+                  )}
+                  {myPockets.map((pocket: any) => (
+                    <TouchableOpacity 
+                      key={pocket.id} 
+                      style={styles.dropdownOption}
+                      onPress={() => { onUpdateField(item.id, 'pocket', pocket); onDropdown(null); }}
+                    >
+                      <Ionicons name={pocket.icon as any} size={16} color={pocket.color} style={{ marginRight: 8 }} />
+                      <Text style={[styles.dropdownOptionText, itemPocket.id === pocket.id && { color: pocket.color, fontWeight: 'bold' }]}>
+                        {pocket.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </View>
+            <TouchableOpacity onPress={() => onDelete(item.id)} style={styles.deleteButton}>
+              <Ionicons name="trash-outline" size={24} color="#FF3B30" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}, (prev, next) => {
+  return (
+    prev.item.id === next.item.id &&
+    prev.item.name === next.item.name &&
+    prev.item.isChecked === next.item.isChecked &&
+    prev.item.quantity === next.item.quantity &&
+    prev.item.price === next.item.price &&
+    prev.item.pocket?.id === next.item.pocket?.id &&
+    prev.item.order === next.item.order && 
+    prev.isExpanded === next.isExpanded &&
+    prev.isDropdownOpen === next.isDropdownOpen
+  );
+});
+
+// 2. EL ENVOLTORIO DE ARRASTRE
+const DraggableProductItem = React.memo((props: any) => {
+  const drag = useReorderableDrag();
+  return <ProductCardContent {...props} drag={drag} />;
+});
+
 export default function HomeScreen({ route, navigation }: any) {
-  const [items, setItems] = useState<Product[]>([]);
+  const [pendingItems, setPendingItems] = useState<Product[]>([]);
+  const [completedItems, setCompletedItems] = useState<Product[]>([]);
   const [inputText, setInputText] = useState('');
   
-  // Estados de la lista
   const [listName, setListName] = useState('Cargando...');
   const [joinCode, setJoinCode] = useState('');
   const [isEditingName, setIsEditingName] = useState(false);
@@ -61,28 +234,32 @@ export default function HomeScreen({ route, navigation }: any) {
   const [myIdentity, setMyIdentity] = useState({ name: '', color: '#007AFF' });
   const [myPockets, setMyPockets] = useState<Pocket[]>([]);
 
+  const [loading, setLoading] = useState(true);
+  const fadeAnim = useRef(new Animated.Value(0.3)).current;
+  
+  const isReordering = useRef(false);
   const { listId } = route.params;
 
-  // 1. Escuchar la configuración del usuario actual y adjuntar el nombre a los bolsillos
+  useEffect(() => {
+    if (loading) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+          Animated.timing(fadeAnim, { toValue: 0.3, duration: 800, useNativeDriver: true })
+        ])
+      ).start();
+    }
+  }, [loading]);
+
   useEffect(() => {
     const user = auth.currentUser;
     if (!user) return;
-    
     const unsubscribeUser = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        
-        setMyIdentity({
-          name: data.displayName || '',
-          color: data.avatarColor || '#007AFF'
-        });
-
+        setMyIdentity({ name: data.displayName || '', color: data.avatarColor || '#007AFF' });
         if (data.pockets && data.pockets.length > 0 && typeof data.pockets[0] === 'object') {
-          // Inyectamos el nombre del dueño en cada bolsillo para que el Footer lo lea
-          const pocketsWithOwner = data.pockets.map((p: any) => ({
-            ...p,
-            ownerName: data.displayName || 'Usuario'
-          }));
+          const pocketsWithOwner = data.pockets.map((p: any) => ({ ...p, ownerName: data.displayName || 'Usuario' }));
           setMyPockets(pocketsWithOwner);
         } else {
           setMyPockets([]);
@@ -92,7 +269,6 @@ export default function HomeScreen({ route, navigation }: any) {
     return () => unsubscribeUser();
   }, []);
 
-  // 2. Escuchar la información de la lista
   useEffect(() => {
     if (!listId) return;
     const unsubscribeList = onSnapshot(doc(db, 'shopping_lists', listId), (docSnap) => {
@@ -104,16 +280,17 @@ export default function HomeScreen({ route, navigation }: any) {
     return () => unsubscribeList();
   }, [listId]);
 
-// 3. Escuchar los productos (Con Soporte Offline / Cache-First)
   useEffect(() => {
     if (!listId) return;
 
-    // A. CARGA ULTRARRÁPIDA: Leemos el disco duro antes de consultar a internet
     const loadCache = async () => {
       try {
         const cachedItems = await AsyncStorage.getItem(`@items_cache_${listId}`);
         if (cachedItems) {
-          setItems(JSON.parse(cachedItems)); // Dibujamos la pantalla al instante
+          const parsed = JSON.parse(cachedItems);
+          setPendingItems(parsed.filter((i: Product) => !i.isChecked || i.isSeparator));
+          setCompletedItems(parsed.filter((i: Product) => i.isChecked && !i.isSeparator));
+          setLoading(false);
         }
       } catch (error) {
         console.log("Error leyendo caché", error);
@@ -121,45 +298,40 @@ export default function HomeScreen({ route, navigation }: any) {
     };
     loadCache();
 
-    // B. CONEXIÓN EN SEGUNDO PLANO: Escuchamos Firebase en tiempo real
     const itemsRef = collection(db, 'shopping_lists', listId, 'items');
     const q = query(itemsRef, orderBy('order', 'asc'));
 
     const unsubscribeItems = onSnapshot(q, (snapshot) => {
-      const fetchedItems: Product[] = [];
+      if (isReordering.current) return;
+
+      const newPending: Product[] = [];
+      const newCompleted: Product[] = [];
+
       snapshot.forEach((docSnap) => {
         const data = docSnap.data();
-        fetchedItems.push({
-          id: docSnap.id,
-          name: data.name,
-          isChecked: data.isChecked,
-          addedBy: data.addedBy,
-          addedByEmail: data.addedByEmail,
-          addedByName: data.addedByName,
-          addedByColor: data.addedByColor,
-          quantity: data.quantity || 1,
-          price: data.price || 0,
-          paymentMethod: data.paymentMethod,
-          pocket: data.pocket,
-          isSeparator: data.isSeparator || false,
-          order: data.order || 0
-        });
+        const product: Product = {
+          id: docSnap.id, name: data.name, isChecked: data.isChecked,
+          addedBy: data.addedBy, addedByEmail: data.addedByEmail, addedByName: data.addedByName, addedByColor: data.addedByColor,
+          quantity: data.quantity || 1, price: data.price || 0,
+          paymentMethod: data.paymentMethod, pocket: data.pocket,
+          isSeparator: data.isSeparator || false, order: data.order || 0
+        };
+        
+        if (product.isChecked && !product.isSeparator) {
+          newCompleted.push(product);
+        } else {
+          newPending.push(product);
+        }
       });
       
-      setItems(fetchedItems); // Actualizamos la pantalla si hay cambios
-      
-      // C. GUARDAMOS LA COPIA: Actualizamos el disco duro para la próxima vez
-      AsyncStorage.setItem(`@items_cache_${listId}`, JSON.stringify(fetchedItems));
+      setPendingItems(newPending);
+      setCompletedItems(newCompleted);
+      setLoading(false);
+      AsyncStorage.setItem(`@items_cache_${listId}`, JSON.stringify([...newPending, ...newCompleted]));
     });
     
     return () => unsubscribeItems();
-  }, [listId]);
-
-  const saveListName = async () => {
-    setIsEditingName(false);
-    if (tempName.trim() === '' || tempName === listName) return;
-    await updateDoc(doc(db, 'shopping_lists', listId), { name: tempName.trim() });
-  };
+  }, [listId]); 
 
   const handleCopyCode = async () => {
     if (!joinCode) return;
@@ -169,252 +341,114 @@ export default function HomeScreen({ route, navigation }: any) {
 
   const addItem = async (isSeparator = false) => {
     if (inputText.trim() === '' || !listId) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const itemsRef = collection(db, 'shopping_lists', listId, 'items');
     
-    const defaultPocket = myPockets.length > 0 
+    const defaultPocket: Pocket = myPockets.length > 0 
       ? myPockets[0] 
       : { id: 'default', name: 'Efectivo', icon: 'wallet-outline', color: '#34C759', ownerName: myIdentity.name };
     
+    const totalItemsCount = pendingItems.length + completedItems.length;
+
     await addDoc(itemsRef, {
       name: isSeparator ? inputText.toUpperCase() : inputText,
-      isChecked: false,
-      createdAt: new Date(),
-      addedBy: auth.currentUser?.uid,
-      addedByEmail: auth.currentUser?.email,
-      addedByName: myIdentity.name,
-      addedByColor: myIdentity.color,
-      quantity: 1,
-      price: 0,
-      pocket: defaultPocket,
-      isSeparator: isSeparator,
-      order: items.length 
+      isChecked: false, createdAt: new Date(),
+      addedBy: auth.currentUser?.uid, addedByEmail: auth.currentUser?.email,
+      addedByName: myIdentity.name, addedByColor: myIdentity.color,
+      quantity: 1, price: 0, pocket: defaultPocket,
+      isSeparator: isSeparator, order: totalItemsCount 
     });
     setInputText('');
   };
 
-  const toggleItem = async (id: string, currentStatus: boolean) => {
+  const toggleItem = useCallback(async (id: string, currentStatus: boolean) => {
     if (!listId) return;
-    if (expandedItemId === id) {
-      setExpandedItemId(null);
-      setDropdownItemId(null);
-    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    if (expandedItemId === id) { setExpandedItemId(null); setDropdownItemId(null); }
     await updateDoc(doc(db, 'shopping_lists', listId, 'items', id), { isChecked: !currentStatus });
-  };
+  }, [listId, expandedItemId]);
 
-  const updateItemField = async (id: string, field: string, value: any) => {
+  const updateItemField = useCallback(async (id: string, field: string, value: any) => {
     if (!listId) return;
     await updateDoc(doc(db, 'shopping_lists', listId, 'items', id), { [field]: value });
-  };
+  }, [listId]);
 
-  const deleteItem = async (id: string) => {
+  const deleteItem = useCallback(async (id: string) => {
     if (!listId) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     await deleteDoc(doc(db, 'shopping_lists', listId, 'items', id));
+  }, [listId]);
+
+  const saveListName = async () => {
+    setIsEditingName(false);
+    if (tempName.trim() === '' || tempName === listName) return;
+    await updateDoc(doc(db, 'shopping_lists', listId), { name: tempName.trim() });
   };
 
   const handleDragEnd = async (newData: Product[]) => {
-    if (!listId) return;
-    const batch = writeBatch(db);
-    newData.forEach((item, index) => {
-      const itemRef = doc(db, 'shopping_lists', listId, 'items', item.id);
-      batch.update(itemRef, { order: index });
-    });
-    await batch.commit();
+    setPendingItems(newData); 
+    AsyncStorage.setItem(`@items_cache_${listId}`, JSON.stringify([...newData, ...completedItems]));
+
+    try {
+      const batch = writeBatch(db);
+      newData.forEach((item, index) => {
+        const itemRef = doc(db, 'shopping_lists', listId, 'items', item.id);
+        batch.update(itemRef, { order: index });
+      });
+      await batch.commit();
+    } catch (error) {
+      console.log("Error guardando orden:", error);
+    } finally {
+      setTimeout(() => { isReordering.current = false; }, 500);
+    }
   };
 
-  const pendingItems = items.filter(item => !item.isChecked);
-  const completedItems = items.filter(item => item.isChecked && !item.isSeparator);
+  // FUNCIONES JS PURAS PARA CRUZAR EL PUENTE DE ANIMACIÓN (WORKLETS)
+  const handleDragStartJS = () => {
+    isReordering.current = true;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+  };
+
+  const handleReorderJS = (from: number, to: number) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const newData = [...pendingItems];
+    const [movedItem] = newData.splice(from, 1);
+    newData.splice(to, 0, movedItem);
+    handleDragEnd(newData);
+  };
 
   const totalCarrito = completedItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
   
-  // El Footer ahora clasifica por el dueño del bolsillo
   const pocketBreakdown = completedItems.reduce((acc, item) => {
     const totalItem = item.price * item.quantity;
     if (totalItem > 0) {
       const currentPocket = item.pocket || { 
         id: 'legacy', name: item.paymentMethod || 'Efectivo', icon: 'wallet-outline', color: '#888', ownerName: item.addedByName 
       };
-      
       const key = currentPocket.id;
       if (!acc[key]) {
-        acc[key] = {
-          pocket: currentPocket,
-          ownerName: currentPocket.ownerName || item.addedByName || 'Usuario', // Usa el dueño del bolsillo
-          total: 0
-        };
+        acc[key] = { pocket: currentPocket, ownerName: currentPocket.ownerName || item.addedByName || 'Usuario', total: 0 };
       }
       acc[key].total += totalItem;
     }
     return acc;
   }, {} as Record<string, { pocket: Pocket, ownerName: string, total: number }>);
 
-  const renderItem = ({ item, drag, isActive }: any) => {
-    const isExpanded = expandedItemId === item.id;
-    const isDropdownOpen = dropdownItemId === item.id;
-
-    const displayName = item.addedByName || (item.addedByEmail ? item.addedByEmail.charAt(0).toUpperCase() : 'U');
-    const initial = displayName.charAt(0).toUpperCase();
-    const isMe = item.addedBy === auth.currentUser?.uid;
-    const identityColor = item.addedByColor || (isMe ? '#007AFF' : '#FF9500');
-    
-    const uiColor = item.isChecked ? '#888' : identityColor;
-    const itemPocket = item.pocket || { id: 'legacy', name: item.paymentMethod || 'Efectivo', icon: 'wallet-outline', color: '#888' };
-
-    const CardContent = () => {
-      if (item.isSeparator) {
-        return (
-          <TouchableOpacity 
-            onLongPress={drag} 
-            delayLongPress={150}
-            activeOpacity={0.8}
-            style={[styles.separatorCard, { elevation: isActive ? 8 : 0 }]}
-          >
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Ionicons name="folder-open" size={24} color="#888" style={{ marginRight: 8 }} />
-              <Text style={styles.separatorText}>{item.name}</Text>
-            </View>
-            <TouchableOpacity onPress={() => deleteItem(item.id)}>
-              <Ionicons name="close-circle" size={24} color="#888" />
-            </TouchableOpacity>
-          </TouchableOpacity>
-        );
-      }
-
-      return (
-        <View style={[styles.itemCard, item.isChecked && styles.itemCardChecked, { elevation: isActive ? 8 : 0 }]}>
-          <TouchableOpacity 
-            style={styles.itemRowBase} 
-            activeOpacity={0.7}
-            onPress={() => {
-              setExpandedItemId(isExpanded ? null : item.id);
-              setDropdownItemId(null); 
-            }}
-            onLongPress={!item.isChecked ? drag : undefined} 
-            delayLongPress={150}
-          >
-            <TouchableOpacity onPress={() => toggleItem(item.id, item.isChecked)} style={styles.checkButton}>
-              <Ionicons name={item.isChecked ? "checkbox" : "square-outline"} size={28} color={uiColor} />
-            </TouchableOpacity>
-
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={[styles.itemText, item.isChecked && styles.itemTextChecked]}>
-                {item.name}
-              </Text>
-              
-              {!isExpanded && (
-                <View style={[styles.avatar, { backgroundColor: item.isChecked ? '#ccc' : identityColor }]}>
-                  <Text style={styles.avatarText}>{initial}</Text>
-                </View>
-              )}
-            </View>
-
-            {!isExpanded && (
-              <View style={{ alignItems: 'flex-end' }}>
-                <View style={[styles.paymentBadge, { borderColor: item.isChecked ? '#eee' : itemPocket.color + '40', backgroundColor: item.isChecked ? '#f5f5f5' : itemPocket.color + '10' }]}>
-                  <Ionicons name={itemPocket.icon as any} size={12} color={item.isChecked ? '#888' : itemPocket.color} style={{ marginRight: 4 }} />
-                  <Text style={[styles.paymentBadgeText, { color: item.isChecked ? '#888' : itemPocket.color }]}>
-                    {itemPocket.name}
-                  </Text>
-                </View>
-                {(item.quantity > 1 || item.price > 0) && (
-                  <Text style={styles.itemSubtext}>
-                    {item.quantity} un • $ {item.price.toLocaleString('es-CL')}
-                  </Text>
-                )}
-              </View>
-            )}
-          </TouchableOpacity>
-
-          {isExpanded && (
-            <View style={styles.expandedContent}>
-              <View style={styles.editorRow}>
-                <View style={styles.quantityControls}>
-                  <TouchableOpacity style={styles.qtyButton} onPress={() => updateItemField(item.id, 'quantity', Math.max(1, item.quantity - 1))}>
-                    <Ionicons name="remove" size={20} color="#333" />
-                  </TouchableOpacity>
-                  <Text style={styles.qtyText}>{item.quantity}</Text>
-                  <TouchableOpacity style={styles.qtyButton} onPress={() => updateItemField(item.id, 'quantity', item.quantity + 1)}>
-                    <Ionicons name="add" size={20} color="#333" />
-                  </TouchableOpacity>
-                </View>
-
-                <Text style={{ color: '#888', marginHorizontal: 8 }}>x</Text>
-
-                <View style={styles.priceContainer}>
-                  <Text style={styles.currencySymbol}>$</Text>
-                  <TextInput
-                    style={styles.priceInput}
-                    keyboardType="numeric"
-                    placeholder="0"
-                    defaultValue={item.price > 0 ? item.price.toString() : ''}
-                    onEndEditing={(e) => {
-                      const num = parseInt(e.nativeEvent.text.replace(/[^0-9]/g, '')) || 0;
-                      updateItemField(item.id, 'price', num);
-                    }}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.pocketRow}>
-                <Text style={styles.pocketLabel}>Paga:</Text>
-                
-                <View style={styles.dropdownContainer}>
-                  <TouchableOpacity 
-                    style={[styles.dropdownHeader, isDropdownOpen && styles.dropdownHeaderOpen]}
-                    onPress={() => setDropdownItemId(isDropdownOpen ? null : item.id)}
-                  >
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                      <Ionicons name={itemPocket.icon as any} size={16} color={itemPocket.color} style={{ marginRight: 8 }} />
-                      <Text style={styles.dropdownHeaderText}>{itemPocket.name}</Text>
-                    </View>
-                    <Ionicons name={isDropdownOpen ? "chevron-up" : "chevron-down"} size={16} color="#888" />
-                  </TouchableOpacity>
-
-                  {isDropdownOpen && (
-                    <View style={styles.dropdownList}>
-                      {myPockets.length === 0 && (
-                        <Text style={{ padding: 12, color: '#888', fontStyle: 'italic', fontSize: 12 }}>
-                          No has configurado bolsillos. Ve a Configuración.
-                        </Text>
-                      )}
-                      {myPockets.map(pocket => (
-                        <TouchableOpacity 
-                          key={pocket.id} 
-                          style={styles.dropdownOption}
-                          onPress={() => {
-                            updateItemField(item.id, 'pocket', pocket);
-                            setDropdownItemId(null);
-                          }}
-                        >
-                          <Ionicons name={pocket.icon as any} size={16} color={pocket.color} style={{ marginRight: 8 }} />
-                          <Text style={[styles.dropdownOptionText, itemPocket.id === pocket.id && { color: pocket.color, fontWeight: 'bold' }]}>
-                            {pocket.name}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-                </View>
-                
-                <TouchableOpacity onPress={() => deleteItem(item.id)} style={styles.deleteButton}>
-                  <Ionicons name="trash-outline" size={24} color="#FF3B30" />
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-        </View>
-      );
-    };
-
-    if (item.isChecked && !item.isSeparator) {
-      return <CardContent />;
-    }
-
-    return (
-      <ScaleDecorator>
-        <CardContent />
-      </ScaleDecorator>
-    );
-  };
+  // Renderizado Inteligente que delega a los sub-componentes aislando las tarjetas
+  const renderItem = useCallback(({ item }: any) => (
+    <DraggableProductItem
+      item={item}
+      isExpanded={expandedItemId === item.id}
+      isDropdownOpen={dropdownItemId === item.id}
+      currentUserId={auth.currentUser?.uid}
+      myPockets={myPockets}
+      onToggle={toggleItem}
+      onDelete={deleteItem}
+      onUpdateField={updateItemField}
+      onExpand={setExpandedItemId}
+      onDropdown={setDropdownItemId}
+    />
+  ), [expandedItemId, dropdownItemId, myPockets, toggleItem, updateItemField, deleteItem]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -424,8 +458,6 @@ export default function HomeScreen({ route, navigation }: any) {
           <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color="#333" />
           </TouchableOpacity>
-          
-          {/* RESTAURADO: El nombre editable de la lista */}
           {isEditingName ? (
             <TextInput
               style={styles.nameInput}
@@ -445,7 +477,6 @@ export default function HomeScreen({ route, navigation }: any) {
               <Ionicons name="pencil" size={16} color="#888" style={{ marginLeft: 6 }} />
             </TouchableOpacity>
           )}
-
           <TouchableOpacity onPress={handleCopyCode} style={styles.shareButton}>
             <Ionicons name="share-social" size={24} color="#007AFF" />
           </TouchableOpacity>
@@ -468,32 +499,68 @@ export default function HomeScreen({ route, navigation }: any) {
         </View>
 
         <View style={{ flex: 1 }}>
-          <DraggableFlatList
-            data={pendingItems}
-            onDragEnd={({ data }) => handleDragEnd(data)}
-            keyExtractor={(item) => item.id}
-            renderItem={renderItem}
-            contentContainerStyle={styles.listContainer}
-            ListFooterComponent={
-              completedItems.length > 0 ? (
-                <View style={styles.completedSection}>
-                  <Text style={styles.completedTitle}>EN EL CARRITO ({completedItems.length})</Text>
-                  {completedItems.map((item) => (
-                    <View key={`completed-${item.id}`}>
-                      {renderItem({ item, drag: () => {}, isActive: false })}
-                    </View>
-                  ))}
-                </View>
-              ) : null
-            }
-          />
+          {loading ? (
+            <View style={styles.listContainer}>
+              {[1, 2, 3, 4, 5].map((key) => (
+                <Animated.View key={key} style={[styles.itemCard, { opacity: fadeAnim, padding: 24, flexDirection: 'row', alignItems: 'center' }]}>
+                  <View style={{ width: 28, height: 28, borderRadius: 4, backgroundColor: '#e0e0e0', marginRight: 16 }} />
+                  <View style={{ flex: 1 }}>
+                    <View style={{ width: '60%', height: 16, backgroundColor: '#e0e0e0', borderRadius: 4, marginBottom: 8 }} />
+                    <View style={{ width: '30%', height: 12, backgroundColor: '#e0e0e0', borderRadius: 4 }} />
+                  </View>
+                </Animated.View>
+              ))}
+            </View>
+          ) : (
+            <ReorderableList
+              data={pendingItems}
+              onDragStart={() => {
+                'worklet';
+                runOnJS(handleDragStartJS)();
+              }}
+              onReorder={({ from, to }) => {
+                'worklet';
+                runOnJS(handleReorderJS)(from, to);
+              }}
+              keyExtractor={(item) => item.id}
+              renderItem={renderItem}
+              contentContainerStyle={styles.listContainer}
+              ListFooterComponent={
+                completedItems.length > 0 ? (
+                  <View style={styles.completedSection}>
+                    <Text style={styles.completedTitle}>EN EL CARRITO ({completedItems.length})</Text>
+                    {completedItems.map((item) => (
+                      <View key={`completed-${item.id}`}>
+                        <ProductCardContent
+                          item={item}
+                          drag={() => {}} 
+                          isExpanded={expandedItemId === item.id}
+                          isDropdownOpen={dropdownItemId === item.id}
+                          currentUserId={auth.currentUser?.uid}
+                          myPockets={myPockets}
+                          onToggle={toggleItem}
+                          onDelete={deleteItem}
+                          onUpdateField={updateItemField}
+                          onExpand={setExpandedItemId}
+                          onDropdown={setDropdownItemId}
+                        />
+                      </View>
+                    ))}
+                  </View>
+                ) : null
+              }
+            />
+          )}
         </View>
 
         <View style={styles.stickyFooter}>
           <TouchableOpacity 
             style={styles.footerHeader} 
             activeOpacity={0.7}
-            onPress={() => setIsFooterExpanded(!isFooterExpanded)}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setIsFooterExpanded(!isFooterExpanded);
+            }}
           >
             <View>
               <Text style={styles.totalsLabel}>Total Boleta (En Carrito)</Text>
@@ -505,12 +572,9 @@ export default function HomeScreen({ route, navigation }: any) {
           {isFooterExpanded && (
             <View style={styles.breakdownContainer}>
               <Text style={styles.breakdownTitle}>Desglose exacto</Text>
-              
               {Object.values(pocketBreakdown)
                 .sort((a, b) => {
-                  // Ordenamos por monto (de mayor a menor)
                   if (b.total !== a.total) return b.total - a.total;
-                  // En caso de empate, ordenamos alfabéticamente por el nombre del bolsillo
                   return a.pocket.name.localeCompare(b.pocket.name);
                 })
                 .map(({ pocket, ownerName, total }) => (
@@ -525,7 +589,6 @@ export default function HomeScreen({ route, navigation }: any) {
                   <Text style={styles.breakdownAmount}>$ {total.toLocaleString('es-CL')}</Text>
                 </View>
               ))}
-              
               {Object.keys(pocketBreakdown).length === 0 && (
                 <Text style={styles.emptyBreakdown}>Aún no has tachado productos con precio.</Text>
               )}
